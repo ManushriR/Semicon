@@ -1,0 +1,10 @@
+.venv/
+.idea/
+__pycache__/
+*.pyc
+dataset/
+results/
+candidate_data/
+models/*.pth
+*.pt
+*.onnx
