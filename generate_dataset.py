@@ -1,40 +1,107 @@
-import os,math,random,argparse,shutil,json
-import numpy as np,pandas as pd
-from PIL import Image,ImageDraw,ImageFilter
 
-p=argparse.ArgumentParser();p.add_argument('--samples',type=int,default=300);p.add_argument('--out',default='dataset');p.add_argument('--seed',type=int,default=20260817);a=p.parse_args()
-rng=np.random.default_rng(a.seed);random.seed(a.seed); S=1000
-if os.path.exists(a.out): shutil.rmtree(a.out)
-for d in ['reference','search','visualization']: os.makedirs(os.path.join(a.out,d))
+import argparse, json, math
+from pathlib import Path
+import cv2
+import numpy as np
+import pandas as pd
+from PIL import Image, ImageFilter
 
-def edge(x,k):
- gx=np.zeros_like(x);gy=np.zeros_like(x);gx[:,1:-1]=(x[:,2:]-x[:,:-2])*.5;gy[1:-1]=(x[2:,:]-x[:-2,:])*.5
- g=np.sqrt(gx*gx+gy*gy);g=(g-g.min())/(g.max()-g.min()+1e-8);return np.clip(x+k*g,0,1)
-def noise(x,p,s): return np.clip(rng.poisson(np.clip(x,0,1)*p)/p+rng.normal(0,s,x.shape),0,1)
-def dram(px,py,lw,vr,ox,oy,jit):
- a=np.zeros((S,S),np.float32);xs=[];ys=[];v=ox
- while v<S: xs.append(int(v));v+=px
- v=oy
- while v<S: ys.append(int(v));v+=py
- for x in xs:
-  w=max(1,int(lw*rng.uniform(.85,1.15)));a[:,max(0,x-w//2):min(S,x+w//2+1)]=rng.uniform(.82,1)
- for y in ys:
-  w=max(1,int(lw*rng.uniform(.85,1.15)));a[max(0,y-w//2):min(S,y+w//2+1),:]=rng.uniform(.80,1)
- for x in xs:
-  for y in ys:
-   xx=x+int(rng.normal(0,jit));yy=y+int(rng.normal(0,jit));r=max(1,int(vr*rng.uniform(.8,1.2)))
-   y0,y1=max(0,yy-r),min(S,yy+r+1);x0,x1=max(0,xx-r),min(S,xx+r+1);Y,X=np.ogrid[y0:y1,x0:x1];m=(X-xx)**2+(Y-yy)**2<=r*r;a[y0:y1,x0:x1][m]=1
- return a
-def save(x,path): Image.fromarray(np.uint8(np.clip(x,0,1)*255)).save(path)
-rows=[]
-for i in range(1,a.samples+1):
- px=float(rng.uniform(18,42));py=float(rng.uniform(18,42));lw=float(rng.uniform(2,6));vr=float(rng.uniform(1,3));jit=float(rng.uniform(0,.8));ox=float(rng.uniform(0,px));oy=float(rng.uniform(0,py));
- diff=rng.choice(['easy','medium','hard','extreme'],p=[.25,.4,.25,.1]);cfg={'easy':(-1,1,.99,1.01,.1,.4,.004,.015,250,450),'medium':(-3,3,.96,1.04,.3,.8,.01,.03,150,300),'hard':(-5,5,.93,1.07,.5,1.2,.02,.055,80,180),'extreme':(-8,8,.90,1.10,.8,1.8,.04,.09,40,100)}[diff]
- amin,amax,smin,smax,bmin,bmax,nmin,nmax,pmin,pmax=cfg;ang=float(rng.uniform(amin,amax));scale=float(rng.uniform(smin,smax));blur=float(rng.uniform(bmin,bmax));ns=float(rng.uniform(nmin,nmax));ps=int(rng.integers(pmin,pmax));es=float(rng.uniform(.08,.28));base=dram(px,py,lw,vr,ox,oy,jit);tx=int(rng.integers(150,850));ty=int(rng.integers(150,850))
- ref=base[ty-50:ty+50,tx-50:tx+50].copy();ref=np.asarray(Image.fromarray(np.uint8(ref*255)).filter(ImageFilter.GaussianBlur(rng.uniform(.05,.35))),dtype=np.float32)/255;ref=edge(ref,rng.uniform(.06,.16));ref=noise(ref,int(rng.integers(220,450)),rng.uniform(.003,.015))
- im=Image.fromarray(np.uint8(base*255)).rotate(ang,Image.Resampling.BICUBIC,expand=False,fillcolor=0);sea=np.asarray(im,dtype=np.float32)/255;c=499.5;t=math.radians(ang);dx=tx-c;dy=ty-c;rx=math.cos(t)*dx-math.sin(t)*dy;ry=math.sin(t)*dx+math.cos(t)*dy;gx=float(np.clip(c+rx*scale,150,850));gy=float(np.clip(c+ry*scale,150,850));sea=np.asarray(Image.fromarray(np.uint8(sea*255)).filter(ImageFilter.GaussianBlur(blur)),dtype=np.float32)/255;sea=edge(sea,es);sea=noise(sea,ps,ns);sea=np.clip((sea-.5)*rng.uniform(.85,1.15)+.5+rng.uniform(-.05,.05),0,1)
- rn=f'ref_{i:05d}.png';sn=f'search_{i:05d}.png';save(ref,os.path.join(a.out,'reference',rn));save(sea,os.path.join(a.out,'search',sn));v=Image.fromarray(np.uint8(sea*255)).convert('RGB');ImageDraw.Draw(v).rectangle([gx-50,gy-50,gx+50,gy+50],outline='red',width=3);v.save(os.path.join(a.out,'visualization',f'pair_{i:05d}.png'))
- rows.append(dict(sample_id=i,reference_image=f'reference/{rn}',search_image=f'search/{sn}',center_x=gx,center_y=gy,pitch_x=px,pitch_y=py,line_width=lw,via_radius=vr,rotation_deg=ang,scale=scale,blur_sigma=blur,noise_sigma=ns,poisson_strength=ps,edge_strength=es,difficulty=diff))
-pd.DataFrame(rows).to_csv(os.path.join(a.out,'metadata.csv'),index=False)
-json.dump({str(r['sample_id']):{'x':r['center_x'],'y':r['center_y']} for r in rows},open(os.path.join(a.out,'ground_truth.json'),'w'),indent=2)
-print('Generated',a.samples)
+S=1000
+
+def edge_bright(a, strength):
+    gx=cv2.Sobel(a,cv2.CV_32F,1,0,3); gy=cv2.Sobel(a,cv2.CV_32F,0,1,3)
+    mag=cv2.magnitude(gx,gy); mag=cv2.normalize(mag,None,0,1,cv2.NORM_MINMAX)
+    return np.clip(a + strength*mag,0,1)
+
+def sensor_noise(a, rng, shot=(70,150), read=(.012,.03)):
+    p=float(rng.integers(*shot))
+    out=rng.poisson(np.clip(a,0,1)*p).astype(np.float32)/p
+    out += rng.normal(0,float(rng.uniform(*read)),a.shape).astype(np.float32)
+    return np.clip(out,0,1)
+
+def dram_tile(rng):
+    # A 1000x1000 high-mag DRAM-style field.
+    img=np.zeros((S,S),np.float32)
+    px=float(rng.uniform(18,32)); py=float(rng.uniform(18,32))
+    lw=float(rng.uniform(2.0,5.0)); vr=float(rng.uniform(1.0,2.8))
+    phx=float(rng.uniform(0,px)); phy=float(rng.uniform(0,py))
+    for x in np.arange(phx,S,px):
+        c=int(round(x)); w=max(1,int(round(lw*rng.uniform(.9,1.1))))
+        img[:,max(0,c-w//2):min(S,c+w//2+1)] = rng.uniform(.72,.94)
+    for y in np.arange(phy,S,py):
+        c=int(round(y)); w=max(1,int(round(lw*rng.uniform(.9,1.1))))
+        img[max(0,c-w//2):min(S,c+w//2+1),:] = rng.uniform(.70,.92)
+    for x in np.arange(phx,S,px):
+        for y in np.arange(phy,S,py):
+            cx,cy=int(round(x)),int(round(y)); r=max(1,int(round(vr*rng.uniform(.85,1.15))))
+            yy0=max(0,cy-r); yy1=min(S,cy+r+1); xx0=max(0,cx-r); xx1=min(S,cx+r+1)
+            yy,xx=np.ogrid[yy0:yy1,xx0:xx1]
+            m=(xx-cx)**2+(yy-cy)**2<=r*r
+            img[yy0:yy1,xx0:xx1][m]=1.0
+    return img, (px,py,lw,vr)
+
+def transform(a, angle, scale):
+    M=cv2.getRotationMatrix2D((499.5,499.5),angle,scale)
+    return cv2.warpAffine(a,M,(S,S),flags=cv2.INTER_LINEAR,borderMode=cv2.BORDER_REFLECT)
+
+def center_nearest_periodic(gt_candidates):
+    return min(gt_candidates,key=lambda p: math.hypot(p[0]-499.5,p[1]-499.5))
+
+def main():
+    ap=argparse.ArgumentParser()
+    ap.add_argument("--architecture",choices=["DRAM","FinFET"],default="DRAM")
+    ap.add_argument("--samples",type=int,default=50)
+    ap.add_argument("--out",default="dataset")
+    ap.add_argument("--seed",type=int,default=20260817)
+    args=ap.parse_args()
+    if args.architecture!="DRAM":
+        raise NotImplementedError("Fast submission build currently uses DRAM.")
+    rng=np.random.default_rng(args.seed)
+    out=Path(args.out); (out/"reference").mkdir(parents=True,exist_ok=True); (out/"search").mkdir(parents=True,exist_ok=True)
+    rows=[]
+    for i in range(1,args.samples+1):
+        # Generate a high-mag unit cell/field. Reference is a crop of it.
+        field, params=dram_tile(rng)
+        px,py,lw,vr=params
+        # Reference is deliberately a full 1000px high-mag field.
+        ref=field.copy()
+        ref=transform(ref,float(rng.uniform(-1.5,1.5)),float(rng.uniform(.985,1.015)))
+        ref=np.asarray(Image.fromarray(np.uint8(ref*255)).filter(ImageFilter.GaussianBlur(float(rng.uniform(.08,.25)))),dtype=np.float32)/255
+        ref=edge_bright(ref,float(rng.uniform(.08,.16)))
+        ref=sensor_noise(ref,rng,shot=(180,360),read=(.006,.016))
+        # Build 10x FOV by tiling the same physical architecture, then downsample.
+        # This deliberately creates periodic ambiguity; official tie rule resolves it.
+        physical=np.tile(field,(10,10))
+        search=np.asarray(Image.fromarray(np.uint8(physical*255)).resize((S,S),Image.Resampling.BOX),dtype=np.float32)/255
+        angle=float(rng.uniform(-8,8)); scale=float(rng.uniform(.94,1.06))
+        search=transform(search,angle,scale)
+        # Every 100x100 tile is a legitimate occurrence before the global transform.
+        candidates=[]
+        for cy in np.arange(50,1000,100):
+            for cx in np.arange(50,1000,100):
+                x,y=transform_point(cx,cy,angle,scale)
+                if 45<x<955 and 45<y<955: candidates.append((x,y))
+        gt=center_nearest_periodic(candidates)
+        search=np.asarray(Image.fromarray(np.uint8(search*255)).filter(ImageFilter.GaussianBlur(float(rng.uniform(.20,.60)))),dtype=np.float32)/255
+        search=edge_bright(search,float(rng.uniform(.12,.30)))
+        search=sensor_noise(search,rng,shot=(45,95),read=(.025,.055))
+        search=np.clip((search-.5)*rng.uniform(.85,1.15)+.5+rng.uniform(-.04,.04),0,1)
+        rp=f"ref_{i:04d}.png"; sp=f"search_{i:04d}.png"
+        Image.fromarray(np.uint8(ref*255),"L").save(out/"reference"/rp)
+        Image.fromarray(np.uint8(search*255),"L").save(out/"search"/sp)
+        rows.append({"sample_id":i,"reference_image":f"reference/{rp}","search_image":f"search/{sp}",
+                     "center_x":gt[0],"center_y":gt[1],"reference_width":1000,"reference_height":1000,
+                     "search_width":1000,"search_height":1000,"physical_scale_ratio":10,
+                     "pitch_x_high_px":px,"pitch_y_high_px":py,"line_width_high_px":lw,"via_radius_high_px":vr,
+                     "rotation_deg":angle,"scale":scale,"independent_noise":True,"architecture":"DRAM"})
+        if i%10==0: print("generated",i)
+    pd.DataFrame(rows).to_csv(out/"metadata.csv",index=False)
+    with open(out/"ground_truth.json","w") as f:
+        json.dump({str(r["sample_id"]):{"center_x":r["center_x"],"center_y":r["center_y"]} for r in rows},f,indent=2)
+    print(f"Generated {args.samples} DRAM pairs; GT uses the closest matching periodic occurrence to search center.")
+
+def transform_point(x,y,angle,scale):
+    c=499.5; t=np.deg2rad(angle); dx=x-c; dy=y-c
+    return c+scale*(np.cos(t)*dx-np.sin(t)*dy), c+scale*(np.sin(t)*dx+np.cos(t)*dy)
+
+if __name__=="__main__": main()

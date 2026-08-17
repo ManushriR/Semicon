@@ -1,9 +1,28 @@
-import os,argparse,json,numpy as np,pandas as pd,matplotlib.pyplot as plt
-from hybrid import localize
-p=argparse.ArgumentParser();p.add_argument('--dataset',default='dataset');p.add_argument('--model',default='models/model.pth');p.add_argument('--output',default='results');a=p.parse_args();os.makedirs(a.output,exist_ok=True);df=pd.read_csv(os.path.join(a.dataset,'metadata.csv'));rows=[]
-for n,(_,r) in enumerate(df.iterrows(),1):
- try:
-  q=localize(os.path.join(a.dataset,r.reference_image),os.path.join(a.dataset,r.search_image),a.model);e=float(np.hypot(q['x_refined']-r.center_x,q['y_refined']-r.center_y));rows.append({'sample_id':r.sample_id,'gt_x':r.center_x,'gt_y':r.center_y,'pred_x':q['x_refined'],'pred_y':q['y_refined'],'error_px':e,'dl_score':q['dl_score'],'ncc':q['ncc'],'confidence':q['confidence'],'difficulty':r.difficulty})
- except Exception as ex: print('failed',r.sample_id,ex)
- if n%25==0: print('evaluated',n)
-r=pd.DataFrame(rows);r.to_csv(os.path.join(a.output,'results.csv'),index=False);e=r.error_px.to_numpy();s={'samples':len(r),'mean_error_px':float(e.mean()),'median_error_px':float(np.median(e)),'rmse_px':float(np.sqrt(np.mean(e**2))),'p95_px':float(np.percentile(e,95)),'within_1px':float(np.mean(e<=1)),'within_2px':float(np.mean(e<=2)),'within_5px':float(np.mean(e<=5))};json.dump(s,open(os.path.join(a.output,'summary.json'),'w'),indent=2);plt.figure(figsize=(8,5));plt.hist(e,bins=30);plt.xlabel('Localization error (pixels)');plt.ylabel('Samples');plt.tight_layout();plt.savefig(os.path.join(a.output,'error_histogram.png'),dpi=180);plt.close();r.groupby('difficulty').error_px.agg(['mean','median','count']).to_csv(os.path.join(a.output,'difficulty_results.csv'));print(s)
+
+import argparse, math, time, json
+from pathlib import Path
+import numpy as np, pandas as pd
+from inference import match
+
+def main():
+    ap=argparse.ArgumentParser(); ap.add_argument("--dataset",default="dataset"); ap.add_argument("--out",default="results")
+    a=ap.parse_args(); ds=Path(a.dataset); out=Path(a.out); out.mkdir(exist_ok=True)
+    meta=pd.read_csv(ds/"metadata.csv"); rows=[]
+    for i,r in meta.iterrows():
+        t=time.perf_counter()
+        pred=match(ds/r["reference_image"],ds/r["search_image"])
+        ms=(time.perf_counter()-t)*1000
+        e=math.hypot(pred["x"]-r["center_x"],pred["y"]-r["center_y"])
+        rows.append({"sample_id":int(r["sample_id"]),"gt_x":r["center_x"],"gt_y":r["center_y"],
+                     "pred_x":pred["x"],"pred_y":pred["y"],"error_px":e,"runtime_ms":ms,
+                     "score":pred["score"],"scale":pred["scale"],"angle":pred["angle"]})
+        if (i+1)%10==0: print("evaluated",i+1)
+    d=pd.DataFrame(rows); d.to_csv(out/"predictions.csv",index=False); e=d.error_px.to_numpy()
+    s={"samples":len(d),"mean_error_px":float(e.mean()),"median_error_px":float(np.median(e)),
+       "rmse_px":float(np.sqrt(np.mean(e*e))),"p90_px":float(np.percentile(e,90)),
+       "p95_px":float(np.percentile(e,95)),"within_1px":float(np.mean(e<=1)),
+       "within_2px":float(np.mean(e<=2)),"within_5px":float(np.mean(e<=5)),
+       "within_10px":float(np.mean(e<=10)),"mean_runtime_ms":float(d.runtime_ms.mean()),
+       "p95_runtime_ms":float(d.runtime_ms.quantile(.95))}
+    (out/"summary.json").write_text(json.dumps(s,indent=2)); print(s)
+if __name__=="__main__": main()
