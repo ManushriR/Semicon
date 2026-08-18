@@ -341,15 +341,17 @@ def match(
         1.06
     ]
 
-    # Generator currently uses approximately +/- 6 degrees.
+    # Generator uses +/- 8 degrees (generate_dataset.py: rng.uniform(-8, 8)).
     angles = [
+        -8,
         -6,
         -4,
         -2,
         0,
         2,
         4,
-        6
+        6,
+        8
     ]
 
     for scale in scales:
