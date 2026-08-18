@@ -40,12 +40,39 @@ def dram_tile(rng):
             img[yy0:yy1,xx0:xx1][m]=1.0
     return img, (px,py,lw,vr)
 
+def add_fiducial(img, cx, cy, size, thickness):
+    """
+    Stamp a cross-shaped alignment fiducial centered at (cx, cy).
+
+    Real photolithography reticles/wafers carry unique alignment marks
+    distinct from the repeating memory array specifically so a navigation
+    system can anchor itself despite the array's periodicity. Without a
+    landmark like this, every occurrence of a purely periodic tile is
+    pixel-identical and the "true" match is undecidable from image content
+    alone.
+    """
+    x0=max(0,cx-size); x1=min(S,cx+size+1)
+    y0=max(0,cy-size); y1=min(S,cy+size+1)
+    tx0=max(0,cx-thickness//2); tx1=min(S,cx+thickness//2+1)
+    ty0=max(0,cy-thickness//2); ty1=min(S,cy+thickness//2+1)
+    img[ty0:ty1, x0:x1] = 1.0
+    img[y0:y1, tx0:tx1] = 1.0
+    return img
+
 def transform(a, angle, scale):
     M=cv2.getRotationMatrix2D((499.5,499.5),angle,scale)
     return cv2.warpAffine(a,M,(S,S),flags=cv2.INTER_LINEAR,borderMode=cv2.BORDER_REFLECT)
 
-def center_nearest_periodic(gt_candidates):
-    return min(gt_candidates,key=lambda p: math.hypot(p[0]-499.5,p[1]-499.5))
+def transform_point(x,y,angle,scale):
+    """
+    Maps a point through the same geometric transform cv2.warpAffine applies
+    with getRotationMatrix2D(center, angle, scale). Note: to match the actual
+    pixel motion produced by warpAffine, call this with the *negated* angle
+    (see transform() call sites below) -- OpenCV's affine convention rotates
+    opposite to the naive forward formula.
+    """
+    c=499.5; t=np.deg2rad(angle); dx=x-c; dy=y-c
+    return c+scale*(np.cos(t)*dx-np.sin(t)*dy), c+scale*(np.sin(t)*dx+np.cos(t)*dy)
 
 def main():
     ap=argparse.ArgumentParser()
@@ -60,28 +87,53 @@ def main():
     out=Path(args.out); (out/"reference").mkdir(parents=True,exist_ok=True); (out/"search").mkdir(parents=True,exist_ok=True)
     rows=[]
     for i in range(1,args.samples+1):
-        # Generate a high-mag unit cell/field. Reference is a crop of it.
+        # Generate a high-mag unit cell/field. This is the purely periodic
+        # background shared by every tile occurrence -- on its own it makes
+        # every occurrence indistinguishable, same as a real DRAM array.
         field, params=dram_tile(rng)
         px,py,lw,vr=params
-        # Reference is deliberately a full 1000px high-mag field.
-        ref=field.copy()
+
+        # A unique alignment fiducial anchors ground truth to exactly one
+        # physical tile. Sized in high-mag (field/physical) pixels so that
+        # after the 10x downsample to the search image it is still several
+        # pixels wide, not sub-resolution.
+        fid_size=int(round(rng.uniform(45,75)))
+        fid_thick=int(round(rng.uniform(14,20)))
+        fx=float(rng.uniform(150,850)); fy=float(rng.uniform(150,850))
+
+        # Reference is a full 1000px high-mag field that includes the fiducial,
+        # since the reference is meant to uniquely identify one real location.
+        ref=add_fiducial(field.copy(), int(round(fx)), int(round(fy)), fid_size, fid_thick)
         ref=transform(ref,float(rng.uniform(-1.5,1.5)),float(rng.uniform(.985,1.015)))
         ref=np.asarray(Image.fromarray(np.uint8(ref*255)).filter(ImageFilter.GaussianBlur(float(rng.uniform(.08,.25)))),dtype=np.float32)/255
         ref=edge_bright(ref,float(rng.uniform(.08,.16)))
         ref=sensor_noise(ref,rng,shot=(180,360),read=(.006,.016))
-        # Build 10x FOV by tiling the same physical architecture, then downsample.
-        # This deliberately creates periodic ambiguity; official tie rule resolves it.
+
+        # Build 10x FOV by tiling the same periodic architecture everywhere,
+        # then stamp the identical fiducial into exactly one tile so only
+        # that tile truly matches the reference's content.
         physical=np.tile(field,(10,10))
+        attempt=0
+        while True:
+            attempt+=1
+            tile_row=int(rng.integers(1,9)); tile_col=int(rng.integers(1,9))
+            angle=float(rng.uniform(-8,8)); scale=float(rng.uniform(.94,1.06))
+            pre_x=tile_col*100.0+fx/10.0; pre_y=tile_row*100.0+fy/10.0
+            gt_x,gt_y=transform_point(pre_x,pre_y,-angle,scale)
+            if 60<gt_x<940 and 60<gt_y<940:
+                break
+            if attempt>50:
+                raise RuntimeError("Could not place fiducial in-bounds after 50 attempts.")
+
+        py0,px0=tile_row*S,tile_col*S
+        physical[py0:py0+S,px0:px0+S]=add_fiducial(
+            physical[py0:py0+S,px0:px0+S].copy(), int(round(fx)), int(round(fy)), fid_size, fid_thick
+        )
+
         search=np.asarray(Image.fromarray(np.uint8(physical*255)).resize((S,S),Image.Resampling.BOX),dtype=np.float32)/255
-        angle=float(rng.uniform(-8,8)); scale=float(rng.uniform(.94,1.06))
         search=transform(search,angle,scale)
-        # Every 100x100 tile is a legitimate occurrence before the global transform.
-        candidates=[]
-        for cy in np.arange(50,1000,100):
-            for cx in np.arange(50,1000,100):
-                x,y=transform_point(cx,cy,angle,scale)
-                if 45<x<955 and 45<y<955: candidates.append((x,y))
-        gt=center_nearest_periodic(candidates)
+        gt=(gt_x,gt_y)
+
         search=np.asarray(Image.fromarray(np.uint8(search*255)).filter(ImageFilter.GaussianBlur(float(rng.uniform(.20,.60)))),dtype=np.float32)/255
         search=edge_bright(search,float(rng.uniform(.12,.30)))
         search=sensor_noise(search,rng,shot=(45,95),read=(.025,.055))
@@ -93,15 +145,12 @@ def main():
                      "center_x":gt[0],"center_y":gt[1],"reference_width":1000,"reference_height":1000,
                      "search_width":1000,"search_height":1000,"physical_scale_ratio":10,
                      "pitch_x_high_px":px,"pitch_y_high_px":py,"line_width_high_px":lw,"via_radius_high_px":vr,
+                     "fiducial_size_high_px":fid_size,"fiducial_thickness_high_px":fid_thick,
                      "rotation_deg":angle,"scale":scale,"independent_noise":True,"architecture":"DRAM"})
         if i%10==0: print("generated",i)
     pd.DataFrame(rows).to_csv(out/"metadata.csv",index=False)
     with open(out/"ground_truth.json","w") as f:
         json.dump({str(r["sample_id"]):{"center_x":r["center_x"],"center_y":r["center_y"]} for r in rows},f,indent=2)
-    print(f"Generated {args.samples} DRAM pairs; GT uses the closest matching periodic occurrence to search center.")
-
-def transform_point(x,y,angle,scale):
-    c=499.5; t=np.deg2rad(angle); dx=x-c; dy=y-c
-    return c+scale*(np.cos(t)*dx-np.sin(t)*dy), c+scale*(np.sin(t)*dx+np.cos(t)*dy)
+    print(f"Generated {args.samples} DRAM pairs; GT is anchored by a unique fiducial embedded in exactly one periodic tile.")
 
 if __name__=="__main__": main()
